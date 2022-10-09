@@ -9,13 +9,23 @@ import {BridgeBase} from "./aztec/BridgeBase.sol";
 
 
 contract VotingBridge is BridgeBase {
-    address public token;
+    address immutable public token;
+    uint256 immutable public votationEnd;
 
     uint256 public option1;
     uint256 public option2;
 
-    constructor(address _rollupProcessor, address _token) BridgeBase(_rollupProcessor) {
+    mapping(uint256 => uint256) transactionMapping;
+
+    error VotationEnded();
+    error VotationNotEnded();
+
+    event VotationResult(uint256 option1Amount, uint256 option2Amount);
+
+    constructor(address _rollupProcessor, address _token, uint256 timeUntilVotationEnd) BridgeBase(_rollupProcessor) {
         token = _token;
+        votationEnd = timeUntilVotationEnd + block.timestamp;
+        IERC20(token).approve(ROLLUP_PROCESSOR, type(uint256).max);
     }
 
     /**
@@ -33,7 +43,7 @@ contract VotingBridge is BridgeBase {
         AztecTypes.AztecAsset calldata _outputAssetA,
         AztecTypes.AztecAsset calldata _outputAssetB,
         uint256 _totalInputValue,
-        uint256,
+        uint256 _interactionNonce,
         uint64 _auxData,
         address _rollupBeneficiary
     )
@@ -47,20 +57,46 @@ contract VotingBridge is BridgeBase {
             bool
         )
     {
+        // Check if votation still going on
+        if (votationEnd >= block.timestamp) revert VotationEnded();
         // Check the input asset is ERC20
         if (_inputAssetA.assetType != AztecTypes.AztecAssetType.ERC20) revert ErrorLib.InvalidInputA();
         if (_outputAssetA.erc20Address != _inputAssetA.erc20Address) revert ErrorLib.InvalidOutputA();
-        // Return the input value of input asset
-        outputValueA = _totalInputValue;
-        // Approve rollup processor to take input value of input asset
-        IERC20(_outputAssetA.erc20Address).approve(ROLLUP_PROCESSOR, _totalInputValue);
+
+        transactionMapping[_interactionNonce] = _totalInputValue;
 
         if (_auxData == 0) {
-            option1 += 1;
+            option1 += _totalInputValue;
         } else {
-            option2 += 1;
+            option2 += _totalInputValue;
         }
 
-        //Lock the tokens until votation is finished
+        return (0, 0, true);
+    }
+
+    function finalise(
+        AztecTypes.AztecAsset calldata _inputAssetA,
+        AztecTypes.AztecAsset calldata _inputAssetB,
+        AztecTypes.AztecAsset calldata _outputAssetA,
+        AztecTypes.AztecAsset calldata _outputAssetB,
+        uint256 _interactionNonce,
+        uint64 _auxData
+    )
+        external
+        payable
+        override(BridgeBase)
+        onlyRollup
+        returns (
+            uint256 outputValueA,
+            uint256 outputValueB,
+            bool interactionComplete
+        )
+    {
+        // Check if votation ended
+        if (votationEnd < block.timestamp) revert VotationNotEnded();
+
+        emit VotationResult(option1, option2);
+
+        return (transactionMapping[_interactionNonce], 0 , true);
     }
 }
